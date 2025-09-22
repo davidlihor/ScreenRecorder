@@ -129,7 +129,20 @@ class ScreenRecordService : Service() {
     }
 
 
+    private var baseNanoTime: Long = 0
+
+    private fun initPtsBase() {
+        baseNanoTime = System.nanoTime()
+    }
+
+    private fun computePtsUs(): Long {
+        return (System.nanoTime() - baseNanoTime) / 1000L
+    }
+
+
     private fun startScreenAndAudioCapture() {
+        initPtsBase()
+
         val metrics = resources.displayMetrics
         outputUri = createFinalVideoUri()
 
@@ -268,8 +281,7 @@ class ScreenRecordService : Service() {
                                     .asShortBuffer().put(it, consumed / 2, toWrite / 2)
                                 inputBuffer.put(tempBytes)
                                 totalBytesSent += toWrite
-                                val totalSamples = totalBytesSent / bytesPerSample / channelCount
-                                val ptsUs = (1_000_000L * totalSamples) / sampleRate
+                                val ptsUs = computePtsUs()
                                 audioEncoder!!.queueInputBuffer(inIndex, 0, toWrite, ptsUs, 0)
                                 consumed += toWrite
                             } else break
@@ -294,8 +306,6 @@ class ScreenRecordService : Service() {
     }
 
 
-    private var videoStartPts = -1L
-    private var audioStartPts = -1L
 
     private fun startMixingThreads() {
         Thread {
@@ -319,10 +329,7 @@ class ScreenRecordService : Service() {
                             continue
                         }
 
-                        if (videoStartPts == -1L) {
-                            videoStartPts = bufferInfo.presentationTimeUs
-                        }
-                        bufferInfo.presentationTimeUs -= videoStartPts
+                        bufferInfo.presentationTimeUs = computePtsUs()
 
                         if (isMuxerStarted && bufferInfo.size > 0) {
                             val outputBuffer = videoEncoder!!.getOutputBuffer(outIndex)!!
@@ -360,10 +367,8 @@ class ScreenRecordService : Service() {
                             continue
                         }
 
-                        if (audioStartPts == -1L) {
-                            audioStartPts = bufferInfo.presentationTimeUs
-                        }
-                        bufferInfo.presentationTimeUs -= audioStartPts
+                        bufferInfo.presentationTimeUs = computePtsUs()
+
 
                         if (isMuxerStarted && bufferInfo.size > 0) {
                             val outputBuffer = audioEncoder!!.getOutputBuffer(outIndex)!!

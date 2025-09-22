@@ -14,30 +14,43 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     private val _stopRecordingEvent = MutableStateFlow(false)
     val stopRecordingEvent: StateFlow<Boolean> = _stopRecordingEvent.asStateFlow()
+    private val _isTouchesEnabled = MutableStateFlow(false)
+    val isTouchesEnabled: StateFlow<Boolean> = _isTouchesEnabled.asStateFlow()
 
-    private val _selectedAudioOption = MutableStateFlow("None")
-    val selectedAudioOption: StateFlow<String> = _selectedAudioOption.asStateFlow()
+    private val _selectedAudioOption = MutableStateFlow(AudioMode.NONE)
+    val selectedAudioOption: StateFlow<AudioMode> = _selectedAudioOption.asStateFlow()
 
     private val _requestAudioPermissionEvent = MutableStateFlow(false)
     val requestAudioPermissionEvent: StateFlow<Boolean> = _requestAudioPermissionEvent.asStateFlow()
+    private val _requestNotificationPermissionEvent = MutableStateFlow(false)
+    val requestNotificationPermissionEvent: StateFlow<Boolean> = _requestNotificationPermissionEvent.asStateFlow()
 
     private val _requestScreenCaptureEvent = MutableStateFlow(false)
     val requestScreenCaptureEvent: StateFlow<Boolean> = _requestScreenCaptureEvent.asStateFlow()
 
-    fun updateSelectedAudioOption(option: String) {
+    fun updateSelectedAudioOption(option: AudioMode) {
         _selectedAudioOption.value = option
     }
 
+    fun updateIsTouchesEnabled(state: Boolean) {
+        _isTouchesEnabled.value = state
+    }
+
     fun onStartRecording() {
-        if (_selectedAudioOption.value == "Media + Mic") {
-            _requestAudioPermissionEvent.value = true
-        } else {
-            _requestScreenCaptureEvent.value = true
-        }
+        _requestNotificationPermissionEvent.value = true
     }
 
     fun onAudioPermissionGranted() {
         _requestScreenCaptureEvent.value = true
+    }
+
+    fun onNotificationPermissionGranted() {
+
+        if (_selectedAudioOption.value == AudioMode.MEDIA_MIC) {
+            _requestAudioPermissionEvent.value = true
+        } else {
+            _requestScreenCaptureEvent.value = true
+        }
     }
 
     fun onRecordingStarted(resultCode: Int, data: Intent?) {
@@ -53,6 +66,9 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _stopRecordingEvent.value = false
     }
 
+    fun consumeRequestNotificationPermissionEvent() {
+        _requestNotificationPermissionEvent.value = false
+    }
     fun consumeRequestAudioPermissionEvent() {
         _requestAudioPermissionEvent.value = false
     }

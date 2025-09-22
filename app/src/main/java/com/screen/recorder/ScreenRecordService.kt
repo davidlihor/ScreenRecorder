@@ -1,12 +1,17 @@
 package com.screen.recorder
 
-import android.app.Notification
 import android.app.NotificationChannel
+import android.os.Handler
+import android.os.Looper
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioAttributes
@@ -25,7 +30,14 @@ import android.os.Environment
 import android.os.IBinder
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenRecordService : Service() {
@@ -45,24 +57,56 @@ class ScreenRecordService : Service() {
     private val notificationChannelId = "ScreenRecorderChannel"
     private val notificationId = 101
     private var audioMode: AudioMode = AudioMode.MEDIA_MIC
+    private var outputUri: Uri? = null
 
+    private var startTime: Long = 0
+    private var handler = Handler(Looper.getMainLooper())
     companion object {
         const val ACTION_START = "com.screen.recorder.START"
         const val ACTION_STOP = "com.screen.recorder.STOP"
         const val EXTRA_AUDIO_MODE = "audio_mode"
+        private val _isRecording = MutableStateFlow(false)
+        val isRecording: StateFlow<Boolean> = _isRecording
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                createNotificationChannel()
-                startForeground(notificationId, createNotification())
-
                 val resultCode = intent.getIntExtra("resultCode", 0)
                 val data = intent.getParcelableExtra("data", Intent::class.java)
-                audioMode = AudioMode.fromValue(intent.getIntExtra(EXTRA_AUDIO_MODE, AudioMode.MEDIA_MIC.modeValue))
+                val audioModeValue = intent.getIntExtra(EXTRA_AUDIO_MODE, AudioMode.NONE.modeValue)
+
+                audioMode = AudioMode.fromValue(audioModeValue)
+                startTime = System.currentTimeMillis()
+                handler.post(runnable)
+                createNotificationChannel()
+
+                val stopIntent = Intent(ACTION_STOP).apply {
+                    setPackage(packageName)
+                }
+                val stopPendingIntent = PendingIntent.getBroadcast(
+                    this,
+                    0,
+                    stopIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+
+                val notification = NotificationCompat.Builder(this, notificationChannelId)
+                    .setContentTitle("Tap here to stop recording.")
+                    .setContentText("00:00")
+                    .setContentIntent(stopPendingIntent)
+                    .setSmallIcon(R.drawable.quick_tile_vector)
+                    .setOngoing(true)
+                    .build()
+
+                val notificationType = when (audioMode) {
+                    AudioMode.MEDIA_MIC -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    AudioMode.MEDIA -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                }
+
+                startForeground(notificationId, notification, notificationType)
 
                 if (resultCode != 0 && data != null) {
                     val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -87,10 +131,10 @@ class ScreenRecordService : Service() {
 
     private fun startScreenAndAudioCapture() {
         val metrics = resources.displayMetrics
-        val outputUri = createFinalVideoUri()
+        outputUri = createFinalVideoUri()
 
         try {
-            val pfd = contentResolver.openFileDescriptor(outputUri, "w")
+            val pfd = contentResolver.openFileDescriptor(outputUri!!, "w")
             mediaMuxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
             val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, metrics.widthPixels, metrics.heightPixels).apply {
@@ -220,7 +264,7 @@ class ScreenRecordService : Service() {
                                 inputBuffer.clear()
                                 val toWrite = minOf(bytesToSend - consumed, inputBuffer.remaining())
                                 val tempBytes = ByteArray(toWrite)
-                                ByteBuffer.wrap(tempBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                ByteBuffer.wrap(tempBytes).order(ByteOrder.LITTLE_ENDIAN)
                                     .asShortBuffer().put(it, consumed / 2, toWrite / 2)
                                 inputBuffer.put(tempBytes)
                                 totalBytesSent += toWrite
@@ -339,6 +383,7 @@ class ScreenRecordService : Service() {
 
 
     private fun stopRecording() {
+        handler.removeCallbacks(runnable)
         if (!isRecording.get()) return
         isRecording.set(false)
 
@@ -373,9 +418,70 @@ class ScreenRecordService : Service() {
         audioTrackIndex = -1
         isMuxerStarted = false
 
+        val cv = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+        contentResolver.update(outputUri!!, cv, null, null)
+
         stopSelf()
     }
 
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_STOP) {
+                stopRecording()
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        _isRecording.value = true
+
+
+        val intentFilter = IntentFilter(ACTION_STOP)
+        ContextCompat.registerReceiver(
+            this,
+            stopReceiver,
+            intentFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    private var runnable: Runnable = object : Runnable {
+
+        override fun run() {
+            val elapsedMillis = System.currentTimeMillis() - startTime
+            val seconds = (elapsedMillis / 1000).toInt()
+            val minutes = seconds / 60
+            val formattedTime = String.format("%02d:%02d", minutes, seconds % 60)
+
+            updateNotification(formattedTime)
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun updateNotification(time: String) {
+        val stopIntent = Intent(ACTION_STOP).apply {
+            setPackage(packageName)
+        }
+        val stopPendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, notificationChannelId)
+            .setContentTitle("Tap here to stop recording.")
+            .setContentText(time)
+            .setContentIntent(stopPendingIntent)
+            .setSmallIcon(R.drawable.quick_tile_vector)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(notificationId, notification)
+    }
 
     private fun createNotificationChannel() {
         val serviceChannel = NotificationChannel(
@@ -387,35 +493,26 @@ class ScreenRecordService : Service() {
         manager.createNotificationChannel(serviceChannel)
     }
 
-    private fun createNotification(): Notification {
-        val notificationIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            notificationIntent,
-            PendingIntent.FLAG_IMMUTABLE
-        )
 
-        val builder = NotificationCompat.Builder(this, notificationChannelId)
-            .setContentTitle("Screen Recorder")
-            .setContentText("Recording screen...")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
-
-        return builder.build()
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(stopReceiver)
+        _isRecording.value = false
     }
 
     private fun createFinalVideoUri(): Uri {
         val contentValues = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "screen_record_final_${System.currentTimeMillis()}.mp4")
+            put(MediaStore.Video.Media.DISPLAY_NAME, generateFileName())
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM)
+            put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/ScreenRecordings")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
         }
         return contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)!!
     }
 
-    override fun onDestroy() {
-        stopRecording()
-        super.onDestroy()
+    private fun generateFileName(): String {
+        val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+        val timestamp = dateFormat.format(Calendar.getInstance().time)
+        return "ScreenRecord_$timestamp.mp4"
     }
 }
